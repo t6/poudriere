@@ -62,6 +62,7 @@ Options:
     -p tree     -- Specify on which ports tree the bulk build will be done
     -R          -- Clean RESTRICTED packages after building
     -r          -- Resursively test all dependencies as well
+    -s          -- Seed packages
     -S          -- Don't recursively rebuild packages affected by other
                    packages requiring incremental rebuild. This can result
                    in broken packages if the ones updated do not retain
@@ -73,6 +74,7 @@ Options:
                    debug output
     -w          -- Save WRKDIR on failed builds
     -z set      -- Specify which SET to use
+    -0          -- Run tests after build
 EOF
 	exit 1
 }
@@ -95,7 +97,7 @@ OVERLAYS=""
 
 [ $# -eq 0 ] && usage
 
-while getopts "ab:B:CcFf:iIj:J:knNO:p:RrSTtvwz:" FLAG; do
+while getopts "0ab:B:CcFf:iIj:J:knNO:p:RrsSTtvwz:" FLAG; do
 	case "${FLAG}" in
 		a)
 			ALL=1
@@ -161,6 +163,12 @@ while getopts "ab:B:CcFf:iIj:J:knNO:p:RrSTtvwz:" FLAG; do
 			;;
 		r)
 			PORTTESTING_RECURSIVE=1
+			;;
+		s)
+			PKG_SEEDING=1
+			;;
+		0)
+			RUN_TESTS=1
 			;;
 		S)
 			SKIP_RECURSIVE_REBUILD=1

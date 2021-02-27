@@ -1372,8 +1372,8 @@ siginfo_handler() {
 			colorize_job_id job_id_color "${j}"
 
 			# Must put colors in format
-			format_origin_phase="\t[${job_id_color}%s${COLOR_RESET}]: ${COLOR_PORT}%-25s | %-25s ${COLOR_PHASE}%-15s${COLOR_RESET} (%s / %s)\n"
-			format_phase="\t[${job_id_color}%s${COLOR_RESET}]: %53s ${COLOR_PHASE}%-15s${COLOR_RESET}\n"
+			format_origin_phase="\t[${job_id_color}%s${COLOR_RESET}]: ${COLOR_PORT}%-35s | %-35s ${COLOR_PHASE}%-15s${COLOR_RESET} (%s / %s)\n"
+			format_phase="\t[${job_id_color}%s${COLOR_RESET}]: %73s ${COLOR_PHASE}%-15s${COLOR_RESET}\n"
 			if [ -n "${pkgname}" ]; then
 				elapsed=$((now - started))
 				calculate_duration buildtime "${elapsed}"
@@ -1766,7 +1766,7 @@ enter_interactive() {
 		ensure_pkg_installed force_extract || \
 		    err 1 "Unable to extract pkg."
 		# Install the selected pkg package
-		injail env USE_PACKAGE_DEPENDS_ONLY=1 \
+		injail env USE_PACKAGE_DEPENDS_ONLY=1 IGNORE_OSVERSION=yes \
 		    /usr/bin/make -C \
 		    ${PORTSDIR}/$(injail /usr/bin/make \
 		    -f ${PORTSDIR}/Mk/bsd.port.mk -V PKGNG_ORIGIN) \
@@ -1785,14 +1785,14 @@ enter_interactive() {
 		# Install run-depends since this is an interactive test
 		msg "Installing run-depends for ${COLOR_PORT}${port}${flavor:+@${flavor}} | ${pkgname}"
 		_lookup_portdir portdir "${port}"
-		injail env USE_PACKAGE_DEPENDS_ONLY=1 \
+		injail env USE_PACKAGE_DEPENDS_ONLY=1 IGNORE_OSVERSION=yes \
 		    /usr/bin/make -C "${portdir}" ${dep_args} \
 		    ${flavor:+FLAVOR=${flavor}} run-depends ||
 		    msg_warn "Failed to install ${COLOR_PORT}${port}${flavor:+@${flavor}} | ${pkgname}${COLOR_RESET} run-depends"
 		msg "Installing ${COLOR_PORT}${port}${flavor:+@${flavor}} | ${pkgname}"
 		# Only use PKGENV during install as testport will store
 		# the package in a different place than dependencies
-		injail env USE_PACKAGE_DEPENDS_ONLY=1 ${PKGENV} \
+		injail env USE_PACKAGE_DEPENDS_ONLY=1 IGNORE_OSVERSION=yes ${PKGENV} \
 		    /usr/bin/make -C "${portdir}" ${dep_args} \
 		    ${flavor:+FLAVOR=${flavor}} install-package ||
 		    msg_warn "Failed to install ${COLOR_PORT}${port}${flavor:+@${flavor}} | ${pkgname}"
@@ -3326,6 +3326,9 @@ build_port() {
 	# Do a install/deinstall cycle for testport/bulk -t.
 	if [ "${PORTTESTING}" -eq 1 ]; then
 		targets="${targets} install deinstall"
+		if [ "${RUN_TESTS}" != "no" ]; then
+			targets="$targets test-depends test"
+		fi
 	fi
 
 	# If not testing, then avoid rechecking deps in build/install;
@@ -3418,6 +3421,18 @@ build_port() {
 				    grep NEEDED | sort -u
 			fi
 			;;
+		test)
+			for jpkg in ${ALLOW_NETWORKING_PACKAGES_TEST}; do
+				case "${pkgname%-*}" in
+				${jpkg})
+					job_msg_warn "ALLOW_NETWORKING_PACKAGES_TEST: Allowing full network access during tests for ${COLOR_PORT}${port}${flavor:+@${flavor}} | ${pkgname}${COLOR_RESET}"
+					msg_warn "ALLOW_NETWORKING_PACKAGES_TEST: Allowing full network access during tests for ${COLOR_PORT}${port}${flavor:+@${flavor}} | ${pkgname}${COLOR_RESET}"
+					JNETNAME="n"
+					break
+					;;
+				esac
+			done
+			;;
 		esac
 
 		print_phase_header ${phase}
@@ -3442,9 +3457,15 @@ build_port() {
 			export GID=${PORTBUILD_UID}
 		fi
 
-		if [ "${phase#*-}" = "depends" ]; then
+		if [ "${phase}" = "test-depends" ]; then
+			sed -i '' '/PACKAGES=\/.npkg/d' ${mnt}/etc/make.conf
 			# No need for nohang or PORT_FLAGS for *-depends
-			injail /usr/bin/env USE_PACKAGE_DEPENDS_ONLY=1 ${phaseenv} \
+			injail /usr/bin/env USE_PACKAGE_DEPENDS_ONLY=1 IGNORE_OSVERSION=yes ${phaseenv} \
+			    /usr/bin/make -C ${portdir} ${MAKE_ARGS} \
+			    ${phase} || return 1
+		elif [ "${phase#*-}" = "depends" ]; then
+			# No need for nohang or PORT_FLAGS for *-depends
+			injail /usr/bin/env USE_PACKAGE_DEPENDS_ONLY=1 IGNORE_OSVERSION=yes ${phaseenv} \
 			    /usr/bin/make -C ${portdir} ${MAKE_ARGS} \
 			    ${phase} || return 1
 		else
@@ -4555,6 +4576,7 @@ deps_fetch_vars() {
 		[ -n "${_origin_flavor}" ] && \
 		    err 1 "deps_fetch_vars: Using DEPENDS_ARGS but attempted lookup on ${originspec}"
 	fi
+	if [ "${RUN_TESTS}" != "no" ]; then
 	if ! port_var_fetch_originspec "${originspec}" \
 	    PKGNAME _pkgname \
 	    ${_depends_args} \
@@ -4565,13 +4587,29 @@ deps_fetch_vars() {
 	    FORBIDDEN _forbidden \
 	    ${_changed_deps} \
 	    ${_changed_options} \
+	    _PDEPS='${PKG_DEPENDS} ${EXTRACT_DEPENDS} ${PATCH_DEPENDS} ${FETCH_DEPENDS} ${BUILD_DEPENDS} ${LIB_DEPENDS} ${RUN_DEPENDS} ${TEST_DEPENDS}' \
+	    '${_PDEPS:C,([^:]*):([^:]*):?.*,\2,:C,^${PORTSDIR}/,,:O:u}' \
+	    _pkg_deps; then
+		msg_error "Error looking up dependencies for ${COLOR_PORT}${originspec}${COLOR_RESET}"
+		return 1
+	fi
+	else
+	if ! port_var_fetch_originspec "${originspec}" \
+	    PKGNAME _pkgname \
+	    ${_depends_args} \
+	    ${_lookup_flavors} \
+	    '${_DEPEND_SPECIALS:C,^${PORTSDIR}/,,}' _depend_specials \
+	    CATEGORIES categories \
+	    IGNORE _ignore \
+	    ${_changed_deps} \
+	    ${_changed_options} \
 	    _PDEPS='${PKG_DEPENDS} ${EXTRACT_DEPENDS} ${PATCH_DEPENDS} ${FETCH_DEPENDS} ${BUILD_DEPENDS} ${LIB_DEPENDS} ${RUN_DEPENDS}' \
 	    '${_PDEPS:C,([^:]*):([^:]*):?.*,\2,:C,^${PORTSDIR}/,,:O:u}' \
 	    _pkg_deps; then
 		msg_error "Error looking up dependencies for ${COLOR_PORT}${originspec}${COLOR_RESET}"
 		return 1
 	fi
-
+	fi
 	[ -n "${_pkgname}" ] || \
 	    err 1 "deps_fetch_vars: failed to get PKGNAME for ${originspec}"
 
@@ -7429,13 +7467,6 @@ prepare_ports() {
 
 	bset status "sanity:"
 
-	if [ -f ${PACKAGES}/.jailversion ]; then
-		if [ "$(cat ${PACKAGES}/.jailversion)" != \
-		    "$(jget ${JAILNAME} version)" ]; then
-			JAIL_NEEDS_CLEAN=1
-		fi
-	fi
-
 	if was_a_bulk_run; then
 		# Stash dependency graph
 		cp -f "${MASTERMNT}/.p/pkg_deps" "${log}/.poudriere.pkg_deps%"
@@ -7576,6 +7607,10 @@ prepare_ports() {
 		update_stats_queued
 	fi
 
+	pkg_seeding
+
+	clean_build_queue
+
 	# Call the deadlock code as non-fatal which will check for cycles
 	msg "Sanity checking build queue"
 	bset status "pkgqueue_sanity_check:"
@@ -7695,6 +7730,67 @@ load_priorities() {
 	POOL_BUCKET_DIRS="${POOL_BUCKET_DIRS} unbalanced"
 
 	return 0
+}
+
+pkg_seeding() {
+	[ "${PKG_SEEDING}" != "no" ] || return 0
+
+	[ "${PWD}" = "${MASTERMNT}/.p" ] || \
+	    err 1 "pkg_seeding requires PWD=${MASTERMNT}/.p"
+
+	local abi dbdir fetched_pkg i jail_version jail_arch pkg_cmd pkgs repo
+
+	# Set up URL prefix
+	jail_version=$(jget ${JAILNAME} version)
+	# $MAJOR_RELEASE-$SUBRELEASE.RELEASE-px --> $MAJOR_RELEASE
+	jail_version="${jail_version%%.*}"
+	jail_arch=$(jget ${JAILNAME} arch)
+	jail_arch=$(echo ${jail_arch} | sed 's,^arm64\.,,' | sed 's,^arm\.,,')
+
+	msg "Seeding packages"
+	bset status "packageseeding:"
+
+	abi="FreeBSD:${jail_version}:${jail_arch}"
+	pkgs=
+	fetched_pkg=
+	while read pkgname originspec dep_reason; do
+		# Don't fetch packages explicitly requested to be built
+		if [ "${dep_reason}" != "listed" ]; then
+			pkgs="${pkgs} ${pkgname}"
+		fi
+		if [ "${originspec}" = "ports-mgmt/pkg" ] || [ "${originspec}" = "ports-mgmt/pkg-devel" ]; then
+			fetched_pkg="${pkgname}"
+		fi
+	done < "all_pkgs"
+
+	dbdir="${POUDRIERE_DATA}/pkg-seeding/${MASTERNAME}"
+	pkg_cmd="pkg -o ABI=${abi} -o PKG_DBDIR=${dbdir} -o REPOS_DIR=/etc/pkg/,${dbdir}/repos/"
+	mkdir -p "${dbdir}/repos"
+	repo="FreeBSD"
+	if [ -r "${POUDRIERED}/pkg-seeding/${MASTERNAME}.conf" ]; then
+		repo="${MASTERNAME}"
+		cp "${POUDRIERED}/pkg-seeding/${MASTERNAME}.conf" "${dbdir}/repos/"
+	elif [ -r "${POUDRIERED}/pkg-seeding/${JAILNAME}.conf" ]; then
+		repo="${JAILNAME}"
+		cp "${POUDRIERED}/pkg-seeding/${JAILNAME}.conf" "${dbdir}/repos/"
+	else
+		# The FreeBSD repository might be disabled on the build host...
+		echo 'FreeBSD: { enabled: yes }' > "${dbdir}/repos/FreeBSD.conf"
+	fi
+	# Sometimes pkg fetch fails to fetch packages with the correct checksum
+	# on the first try.  Retry several times to work around this bug(?).
+	i=0
+	while ! ${pkg_cmd} fetch -r "${repo}" -y -o "${PACKAGES}" ${pkgs}; do
+		i=$((i + 1))
+		if [ $i -ge 200 ]; then
+			err 1 "pkg fetch failed"
+		fi
+	done
+	if [ -n "${fetched_pkg}" ]; then
+		mkdir -p "${PACKAGES}/Latest"
+		install -l rs "${PACKAGES}/All/${fetched_pkg}.${PKG_EXT}" "${PACKAGES}/Latest/pkg.${PKG_EXT}"
+	fi
+	msg "Package seeding done"
 }
 
 balance_pool() {
@@ -8337,6 +8433,9 @@ INTERACTIVE_MODE=0
 : ${HTML_TYPE:=inline}
 : ${LC_COLLATE:=C}
 export LC_COLLATE
+
+: ${PKG_SEEDING:=no}
+: ${RUN_TESTS:=no}
 
 if [ -n "${MAX_MEMORY}" ]; then
 	MAX_MEMORY_BYTES="$((MAX_MEMORY * 1024 * 1024 * 1024))"
